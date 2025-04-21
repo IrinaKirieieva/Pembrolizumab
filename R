@@ -1,0 +1,88 @@
+library(data.table)
+library(SingleCellExperiment)
+library(hdf5r)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(anndata)
+install.packages("anndata")
+
+setwd("C:/Users/User/OneDrive/Рабочий стол/analysis")
+
+annotDF <- fread("annotations.tsv", sep="\t")
+head(annotDF)
+
+detectDF <- fread("detections.tsv", sep="\t")
+head(detectDF)
+
+
+dim(detectDF)
+#total number of cells
+
+# extraction columns with mean protein expression values
+protDF <- detectDF[, .SD, .SDcols = grep("Cell: Mean", names(detectDF))]
+head(protDF)
+
+# cleaning up column names
+names(protDF) <-  map_chr(names(protDF), ~ str_split(.x, ":")[[1]][1])
+head(protDF)
+
+# Remove DAPI and Autofluorescence (I would leave to see nuclear staining)
+# protDF <- protDF |>  
+#   select(-`Channel 1`)
+# print(class(protDF))
+
+# column sorting in descending order
+protDF <- protDF |> 
+  map(~ sort(.x, decreasing = TRUE)) |> 
+  as.data.frame()
+
+print(protDF)
+head(protDF)
+
+# metadata
+spatialCols <- c("Centroid X px", "Centroid Y px", "Cell: Area px^2", "Image", "Object ID")
+spatialNames <- c("spatial_X", "spatial_Y", "Area", "ImageID", "ObjectID")
+spatDF <- detectDF %>% select(all_of(spatialCols))
+setnames(spatDF, spatialCols, spatialNames)
+
+# cleaning up ImageID column (maybe different every time)
+spatDF$ImageID <- str_replace(spatDF$ImageID, "\\.ome.tif$", "")
+print(spatDF)
+
+adata <- AnnData(
+  X = as.matrix(protDF),
+  obs = spatDF
+)
+
+write_h5ad(adata, "adata.h5ad")
+
+computeTop20Btm10 <- function(ad) {
+  top20btm10DF <- data.frame(ImageID = character(), Protein = character(), top20btm10 = numeric(), stringsAsFactors = FALSE)
+  
+  for (sID in unique(ad$obs$ImageID)) { # or each sample
+    subAD <- ad[ad$obs$ImageID == sID, ]
+    
+    for (x in colnames(subAD$X)) {  # for each protein in the sub-AnnData
+      aX <- as.vector(subAD$X[, x])
+     
+      top20 <- sort(aX, decreasing = TRUE)[1:20]  #20 largest values in aX
+      
+      btm10 <- sort(aX)[1:floor(length(aX) * 0.1)] # mean of the bottom 10th percentile of aX
+      
+      top20btm10 <- mean(top20) / mean(btm10) 
+      
+      top20btm10DF <- rbind(top20btm10DF, 
+                            data.frame(ImageID = sID, 
+                                       Protein = x, 
+                                       top20btm10 = top20btm10)) # append result to the data frame
+    }
+  }
+  
+  top20btm10DF$top20btm10 <- round(top20btm10DF$top20btm10, 2)
+  
+  return(top20btm10DF)
+}
+
+result <- computeTop20Btm10(adata)
+print(result)
